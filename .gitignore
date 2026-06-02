@@ -1,0 +1,18 @@
+# Python (Archivos compilados y caché)
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+
+# Datos dinámicos del proyecto (Bases de datos y Logs)
+logs/access_log.db
+logs/app.log
+
+# Configuraciones de editores/IDE (Opcional pero recomendado)
+.vscode/
+.idea/
+.DS_Store
