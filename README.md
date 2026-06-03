@@ -9,6 +9,8 @@ Integración de una cerradura magnética controlada por el arduino y una cámara
 // ------------------------------------------------------------------
 
 const int PIN_RELE = 7; 
+const int LED_RED = 8;
+const int LED_GREEN = 9;
 
 unsigned long tiempoApertura = 0;
 const unsigned long COOLDOWN_ABIERTO = 5000; // 5 segundos
@@ -17,9 +19,13 @@ bool lockAbierto = false;
 void setup() {
   Serial.begin(9600);
   pinMode(PIN_RELE, OUTPUT);
+  pinMode(LED_RED, OUTPUT);
+  pinMode(LED_GREEN, OUTPUT);
   
   // Ajustar según si tu relé se activa con LOW o HIGH
-  digitalWrite(PIN_RELE, LOW); 
+  digitalWrite(PIN_RELE, HIGH);
+  digitalWrite(LED_RED, HIGH);
+  digitalWrite(LED_GREEN, LOW); 
   
   Serial.println("ARDUINO_LISTO");
 }
@@ -27,7 +33,9 @@ void setup() {
 void loop() {
   // 1. Manejo del temporizador asíncrono para el cierre automático
   if (lockAbierto && (millis() - tiempoApertura >= COOLDOWN_ABIERTO)) {
-    digitalWrite(PIN_RELE, LOW);
+    digitalWrite(PIN_RELE, HIGH);
+    digitalWrite(LED_RED, HIGH);
+    digitalWrite(LED_GREEN, LOW);
     lockAbierto = false;
     Serial.println("OK_CERRADO");
   }
@@ -38,14 +46,18 @@ void loop() {
     comando.trim(); 
 
     if (comando == "OPEN") {
-      digitalWrite(PIN_RELE, HIGH);   
+      digitalWrite(PIN_RELE, LOW);
+      digitalWrite(LED_RED, LOW);
+      digitalWrite(LED_GREEN, HIGH);   
       lockAbierto = true;
       tiempoApertura = millis(); // Registrar el tiempo actual
       Serial.println("OK_ABIERTO");   
       
     } else if (comando == "CLOSE") {
       // Permite forzar el cierre inmediato antes de los 5 segundos
-      digitalWrite(PIN_RELE, LOW);
+      digitalWrite(PIN_RELE, HIGH);
+      digitalWrite(LED_RED, HIGH);
+      digitalWrite(LED_GREEN, LOW);
       lockAbierto = false;
       Serial.println("OK_CERRADO");
       
