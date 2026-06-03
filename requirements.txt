@@ -1,20 +1,21 @@
-# Smart Lock — Raspberry Pi 5
+# ============================================================
+# Smart Lock — Requerimientos de Python para Pi 4 / Pi 5
 # Instalar con: pip install -r requirements.txt
-# (Dentro del venv creado con install_face_recognition.sh)
+# ============================================================
 
-# Reconocimiento facial
-face_recognition          # requiere dlib (instalar primero manualmente)
+# Reconocimiento Facial y Matemáticas
+# (Nota: dlib se compila automáticamente al instalar face_recognition si el sistema tiene cmake)
+face_recognition
+numpy
 
-# Cámara
-opencv-python-headless    # procesamiento de imágenes + MJPEG stream
-Pillow                    # manejo de imágenes para registro de caras
+# Procesamiento de Imágenes y Video
+opencv-python-headless
+Pillow
 
-# API
+# Backend y Servidor Web
 fastapi
 uvicorn[standard]
+python-multipart
 
-# Serial (comunicación con ATmega)
+# Comunicación con Hardware (Arduino / ATmega328P)
 pyserial
-
-# Utilidades
-numpy
