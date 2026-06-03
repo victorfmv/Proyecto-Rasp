@@ -1,3 +1,9 @@
+"""
+app/lock_controller.py
+Módulo de control de cerradura.
+Gestiona comunicación serial con Arduino para abrir/cerrar cerradura magnética.
+"""
+
 import serial
 import threading
 import time

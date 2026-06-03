@@ -5,51 +5,51 @@ Integración de una cerradura magnética controlada por el arduino y una cámara
 ## Código del arduino
 ```cpp
 // ------------------------------------------------------------------
-// Smart Lock - Controlador de Hardware (Arduino)
+// Smart Lock - Controlador de Hardware No Bloqueante
 // ------------------------------------------------------------------
 
-const int PIN_RELE = 7; // Pin digital conectado al módulo de relé
+const int PIN_RELE = 7; 
+
+unsigned long tiempoApertura = 0;
+const unsigned long COOLDOWN_ABIERTO = 5000; // 5 segundos
+bool lockAbierto = false;
 
 void setup() {
-  // Inicializar comunicación serial a 9600 baudios (debe coincidir con la Raspberry)
   Serial.begin(9600);
-  
-  // Configurar el pin del relé como salida
   pinMode(PIN_RELE, OUTPUT);
   
-  // Asegurar que inicie apagado (cerradura bloqueada)
-  // Nota: Si tu módulo de relé se activa con LOW, cambia esto a HIGH.
+  // Ajustar según si tu relé se activa con LOW o HIGH
   digitalWrite(PIN_RELE, LOW); 
   
-  // Enviar un mensaje inicial para saber que el Arduino reinició correctamente
   Serial.println("ARDUINO_LISTO");
 }
 
 void loop() {
-  // Verificar si hay datos disponibles en el puerto serial desde la Raspberry
+  // 1. Manejo del temporizador asíncrono para el cierre automático
+  if (lockAbierto && (millis() - tiempoApertura >= COOLDOWN_ABIERTO)) {
+    digitalWrite(PIN_RELE, LOW);
+    lockAbierto = false;
+    Serial.println("OK_CERRADO");
+  }
+
+  // 2. Lectura no bloqueante del puerto serial
   if (Serial.available() > 0) {
-    
-    // Leer la cadena de texto hasta el salto de línea (\n)
     String comando = Serial.readStringUntil('\n');
-    
-    // Eliminar espacios en blanco o caracteres ocultos (como \r)
     comando.trim(); 
 
-    // Procesar el comando recibido
     if (comando == "OPEN") {
-      // 1. Abrir la cerradura
       digitalWrite(PIN_RELE, HIGH);   
+      lockAbierto = true;
+      tiempoApertura = millis(); // Registrar el tiempo actual
       Serial.println("OK_ABIERTO");   
       
-      // 2. Mantener abierto por 5 segundos (5000 milisegundos)
-      delay(5000);                    
-      
-      // 3. Volver a bloquear la cerradura
-      digitalWrite(PIN_RELE, LOW);    
-      Serial.println("OK_CERRADO");  
+    } else if (comando == "CLOSE") {
+      // Permite forzar el cierre inmediato antes de los 5 segundos
+      digitalWrite(PIN_RELE, LOW);
+      lockAbierto = false;
+      Serial.println("OK_CERRADO");
       
     } else if (comando.length() > 0) {
-      // Si llega un comando distinto a "OPEN" y no está vacío
       Serial.print("ERROR_COMANDO_DESCONOCIDO:");
       Serial.println(comando);
     }
