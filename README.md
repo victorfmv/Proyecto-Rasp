@@ -5,66 +5,96 @@ Integración de una cerradura magnética controlada por el arduino y una cámara
 ## Código del arduino
 ```cpp
 // ------------------------------------------------------------------
-// Smart Lock - Controlador de Hardware No Bloqueante
+// Smart Lock - Controlador de Hardware No Bloqueante (Definitivo)
 // ------------------------------------------------------------------
 
-const int PIN_RELE = 7; 
-const int LED_RED = 8;
-const int LED_GREEN = 9;
+// Definición de Pines
+const uint8_t PIN_RELE = 7; 
+const uint8_t LED_RED = 8;
+const uint8_t LED_GREEN = 9;
+const uint8_t BUTTON_INSIDE = 10;
 
+// Variables de Control de Tiempo
 unsigned long tiempoApertura = 0;
-const unsigned long COOLDOWN_ABIERTO = 5000; // 5 segundos
+const unsigned long COOLDOWN_ABIERTO = 5000; // 5 segundos de apertura
 bool lockAbierto = false;
 
+// Variable para el control del botón físico
+bool botonPresionadoAntes = false;
+
 void setup() {
+  // Inicializar comunicación serial a 9600 baudios (coincide con la Raspberry Pi)
   Serial.begin(9600);
+  
+  // Configuración de Pines
   pinMode(PIN_RELE, OUTPUT);
   pinMode(LED_RED, OUTPUT);
   pinMode(LED_GREEN, OUTPUT);
   
-  // Ajustar según si tu relé se activa con LOW o HIGH
+  // INPUT_PULLUP activa la resistencia interna de 20k, el botón debe ir a GND
+  pinMode(BUTTON_INSIDE, INPUT_PULLUP);
+  
+  // Estado inicial del sistema por defecto (Puerta Bloqueada)
+  // Nota: Como tu relé se activa con LOW, HIGH significa "apagado / sin energía"
   digitalWrite(PIN_RELE, HIGH);
   digitalWrite(LED_RED, HIGH);
-  digitalWrite(LED_GREEN, LOW); 
+  digitalWrite(LED_GREEN, LOW);
   
+  // Enviar señal de sincronización inicial al backend en Python
   Serial.println("ARDUINO_LISTO");
 }
 
+// Función inline para abrir la cerradura
+inline void open_lock() {
+  digitalWrite(PIN_RELE, LOW);     // Activa el relé (deja pasar corriente a la cerradura)
+  digitalWrite(LED_RED, LOW);      // Apaga LED rojo
+  digitalWrite(LED_GREEN, HIGH);   // Enciende LED verde
+  lockAbierto = true;
+  tiempoApertura = millis();       // Guarda el tiempo exacto en que se abrió
+}
+
+// Función inline para cerrar la cerradura
+inline void close_lock() {
+  digitalWrite(PIN_RELE, HIGH);    // Desactiva el relé (bloquea la cerradura)
+  digitalWrite(LED_RED, HIGH);     // Enciende LED rojo
+  digitalWrite(LED_GREEN, LOW);    // Apaga LED verde
+  lockAbierto = false;
+}
+
 void loop() {
-  // 1. Manejo del temporizador asíncrono para el cierre automático
+  // 1. TEMPORIZADOR ASÍNCRONO (Maneja el cierre automático sin congelar el programa)
   if (lockAbierto && (millis() - tiempoApertura >= COOLDOWN_ABIERTO)) {
-    digitalWrite(PIN_RELE, HIGH);
-    digitalWrite(LED_RED, HIGH);
-    digitalWrite(LED_GREEN, LOW);
-    lockAbierto = false;
+    close_lock();
     Serial.println("OK_CERRADO");
   }
 
-  // 2. Lectura no bloqueante del puerto serial
+  // 2. LECTURA SERIAL (Escucha peticiones de apertura de la Raspberry Pi)
   if (Serial.available() > 0) {
     String comando = Serial.readStringUntil('\n');
-    comando.trim(); 
+    comando.trim(); // Limpia saltos de línea (\r\n) y espacios externos
 
     if (comando == "OPEN") {
-      digitalWrite(PIN_RELE, LOW);
-      digitalWrite(LED_RED, LOW);
-      digitalWrite(LED_GREEN, HIGH);   
-      lockAbierto = true;
-      tiempoApertura = millis(); // Registrar el tiempo actual
+      open_lock();
       Serial.println("OK_ABIERTO");   
       
-    } else if (comando == "CLOSE") {
-      // Permite forzar el cierre inmediato antes de los 5 segundos
-      digitalWrite(PIN_RELE, HIGH);
-      digitalWrite(LED_RED, HIGH);
-      digitalWrite(LED_GREEN, LOW);
-      lockAbierto = false;
-      Serial.println("OK_CERRADO");
-      
     } else if (comando.length() > 0) {
+      // Envío de errores en caso de recibir bytes basura o comandos no válidos
       Serial.print("ERROR_COMANDO_DESCONOCIDO:");
       Serial.println(comando);
     }
+  }
+
+  // 3. BOTÓN FÍSICO DE SALIDA (Control por flanco de bajada / Pulsación única)
+  // Al usar INPUT_PULLUP, digitalRead devuelve LOW (false) cuando el botón se presiona
+  bool botonActual = !digitalRead(BUTTON_INSIDE); 
+
+  if (botonActual && !botonPresionadoAntes) {
+    open_lock();
+    botonPresionadoAntes = true;        // Bloquea repeticiones consecutivas en el bucle
+    delay(50);                          // Pequeño antirrebote de hardware (debounce)
+  } 
+  else if (!botonActual) {
+    botonPresionadoAntes = false;       // Libera el seguro cuando la persona suelta el botón
   }
 }
 ```

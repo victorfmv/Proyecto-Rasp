@@ -241,17 +241,10 @@ async def recognize_photo(file: UploadFile = File(...)):
 
 @app.post("/unlock/manual")
 def manual_unlock():
-    """Abre la cerradura manualmente desde la UI."""
+    """Abre la cerradura manualmente desde la UI. El cierre es automático a los 5s."""
     result = lock.open_lock()
-    db.log_access(name="Manual (UI)", authorized=True, confidence=None, action="manual_open")
-    return result
-
-
-@app.post("/lock")
-def manual_lock():
-    """Cierra la cerradura manualmente."""
-    result = lock.close_lock()
-    db.log_access(name="Manual (UI)", authorized=True, confidence=None, action="manual_close")
+    if result["success"]:
+        db.log_access(name="Manual (UI)", authorized=True, confidence=None, action="manual_open")
     return result
 
 
