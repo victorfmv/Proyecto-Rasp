@@ -4,6 +4,7 @@ Módulo de captura de cámara con Pi Camera (libcamera).
 """
 
 import logging
+import threading
 import numpy as np
 
 logger = logging.getLogger(__name__)
@@ -19,6 +20,7 @@ class Camera:
         self.width = width
         self.height = height
         self._cam = None
+        self._capture_lock = threading.Lock()
         self._init_camera()
 
     def _init_camera(self):
@@ -49,13 +51,14 @@ class Camera:
         """
         if not self._cam:
             raise RuntimeError("Cámara no inicializada")
-        
-        try:
-            frame = self._cam.capture_array()
-            return frame
-        except Exception as e:
-            logger.error(f"Error capturando frame: {e}")
-            raise
+
+        with self._capture_lock:
+            try:
+                frame = self._cam.capture_array()
+                return frame
+            except Exception as e:
+                logger.error(f"Error capturando frame: {e}")
+                raise
 
     def capture_jpeg(self, quality: int = 85) -> bytes:
         """Captura un frame y lo retorna como bytes JPEG para la UI."""

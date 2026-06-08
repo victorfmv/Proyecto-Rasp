@@ -9,10 +9,12 @@ Endpoints:
   POST /unlock/manual → abrir manualmente desde la UI
   POST /lock          → cerrar manualmente
   POST /faces/register → registrar nueva cara (sube foto)
+  POST /faces/register/camera → registrar cara usando la cámara en vivo
   DELETE /faces/{name} → eliminar cara registrada
   GET  /faces         → listar caras registradas
-  POST /recognize     → reconocer cara en foto subida (para pruebas)
-  GET  /stream        → MJPEG stream de la cámara con overlay
+  POST /recognize     → reconocer una cara usando la cámara en vivo
+  GET  /stream        → MJPEG stream de la cámara en vivo con overlay
+  GET  /stream/preview → preview de 10 segundos con reconocimiento y overlay de color
   GET  /logs          → últimos registros de acceso
   GET  /logs/stats    → estadísticas
 """
@@ -69,6 +71,24 @@ _state_lock = threading.Lock()
 # Lock para sincronizar acceso a face_recognition (dlib no es thread-safe)
 # Previene corrupción de memoria al usar face_recognition simultáneamente
 recognition_lock = threading.Lock()
+
+# Control de streaming en vivo
+streaming_stop = threading.Event()
+stream_count = 0
+stream_count_lock = threading.Lock()
+
+
+def _increment_stream_count():
+    global stream_count
+    with stream_count_lock:
+        stream_count += 1
+
+
+def _decrement_stream_count():
+    global stream_count
+    with stream_count_lock:
+        if stream_count > 0:
+            stream_count -= 1
 
 
 # ------------------------------------------------------------------
@@ -195,9 +215,15 @@ def get_status():
     lock_status = lock.get_status()
     with _state_lock:
         recognition = dict(last_recognition)
+    with stream_count_lock:
+        active_streams = stream_count
     return {
         "lock": lock_status,
-        "camera": {"active": True},
+        "camera": {
+            "active": True,
+            "streaming": active_streams > 0,
+            "streams_active": active_streams,
+        },
         "last_recognition": recognition,
         "registered_faces": face_engine.list_faces(),
     }
@@ -228,6 +254,33 @@ async def register_face(name: str, file: UploadFile = File(...)):
     return result
 
 
+@app.post("/faces/register/camera")
+def register_face_camera(name: str):
+    """
+    Registra una nueva cara usando una captura desde la cámara en vivo.
+    """
+    if not name or len(name.strip()) < 2:
+        raise HTTPException(400, "El nombre debe tener al menos 2 caracteres.")
+
+    try:
+        frame_rgb = camera.capture_rgb()
+    except Exception as e:
+        logger.error(f"Error capturando imagen para registro: {e}")
+        raise HTTPException(500, "No se pudo capturar la imagen desde la cámara.")
+
+    import cv2
+    _, buffer = cv2.imencode('.jpg', cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 85])
+    image_bytes = buffer.tobytes()
+
+    with recognition_lock:
+        result = face_engine.register_face(name.strip(), image_bytes)
+
+    if not result["success"]:
+        raise HTTPException(400, result["reason"])
+
+    return result
+
+
 @app.delete("/faces/{name}")
 def delete_face(name: str):
     result = face_engine.remove_face(name)
@@ -237,20 +290,37 @@ def delete_face(name: str):
 
 
 @app.post("/recognize")
-async def recognize_photo(file: UploadFile = File(...)):
+def recognize_photo():
     """
-    Reconoce una cara en una foto subida (útil para pruebas sin cámara física).
+    Reconoce una cara usando la cámara en vivo durante un máximo de 5 segundos.
     """
-    from PIL import Image
-    image_bytes = await file.read()
-    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    frame = np.array(image)
-    
-    # Sincronizar acceso a face_recognition (dlib) - no es thread-safe
-    with recognition_lock:
-        result = face_engine.recognize(frame)
-    
-    return result
+    timeout = 5.0
+    deadline = time.time() + timeout
+    last_result = None
+
+    while time.time() < deadline:
+        try:
+            frame = camera.capture_rgb()
+        except Exception as e:
+            logger.error(f"Error capturando imagen para reconocimiento: {e}")
+            raise HTTPException(500, "No se pudo capturar la imagen desde la cámara.")
+
+        with recognition_lock:
+            result = face_engine.recognize(frame)
+
+        last_result = result
+        if result["face_detected"]:
+            return result
+
+        time.sleep(0.1)
+
+    return last_result or {
+        "authorized": False,
+        "name": None,
+        "confidence": None,
+        "face_detected": False,
+        "reason": "No se detectó ninguna cara durante el tiempo de espera.",
+    }
 
 
 @app.post("/unlock/manual")
@@ -278,39 +348,126 @@ def video_stream():
     MJPEG stream de la cámara en tiempo real.
     Abrir en browser: http://IP_RASP:8000/stream
     """
+    streaming_stop.clear()
+    _increment_stream_count()
+
     def generate():
         import cv2
-        while True:
-            try:
-                frame_rgb = camera.capture_rgb()
-                with _state_lock:
-                    recog = dict(last_recognition)
+        try:
+            while not streaming_stop.is_set():
+                try:
+                    frame_rgb = camera.capture_rgb()
+                    with _state_lock:
+                        recog = dict(last_recognition)
 
-                # Overlay con resultado del reconocimiento
-                frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+                    # Overlay con resultado del reconocimiento
+                    frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
 
-                if recog["face_detected"]:
-                    color = (0, 255, 0) if recog["authorized"] else (0, 0, 255)
-                    label = recog["name"] or "Desconocido"
-                    conf_str = f" ({recog['confidence']:.0%})" if recog["confidence"] else ""
+                    if recog["face_detected"]:
+                        color = (0, 255, 0) if recog["authorized"] else (0, 0, 255)
+                        label = recog["name"] or "Desconocido"
+                        conf_str = f" ({recog['confidence']:.0%})" if recog["confidence"] else ""
+                        cv2.putText(
+                            frame_bgr, f"{label}{conf_str}",
+                            (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.0, color, 2
+                        )
+
+                    _, buffer = cv2.imencode(".jpg", frame_bgr, [cv2.IMWRITE_JPEG_QUALITY, 75])
+                    frame_bytes = buffer.tobytes()
+
+                    yield (
+                        b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"
+                        + frame_bytes
+                        + b"\r\n"
+                    )
+                    time.sleep(0.05)  # ~20 FPS para el stream
+
+                except Exception as e:
+                    logger.error(f"Error en stream: {e}")
+                    time.sleep(0.5)
+        except GeneratorExit:
+            pass
+        finally:
+            _decrement_stream_count()
+            logger.info("Stream cerrado")
+
+    return StreamingResponse(
+        generate(), media_type="multipart/x-mixed-replace; boundary=frame"
+    )
+
+
+@app.post("/stream/stop")
+def stop_stream():
+    """Detiene la transmisión en vivo de la cámara (solo afecta a /stream)."""
+    streaming_stop.set()
+    return {"success": True, "message": "Las nuevas conexiones se cerrarán progresivamente."}
+
+
+@app.get("/stream/preview")
+def preview_stream(duration: int = 10):
+    """Activa la cámara y transmite por 10 segundos con reconocimiento de rostro.
+    Accesible en: http://localhost:8000/stream/preview
+    """
+    if duration <= 0 or duration > 30:
+        raise HTTPException(400, "La duración debe estar entre 1 y 30 segundos.")
+
+    def generate():
+        import cv2
+        deadline = time.time() + duration
+        frame_count = 0
+        try:
+            while time.time() < deadline:
+                try:
+                    frame_rgb = camera.capture_rgb()
+                    with recognition_lock:
+                        result = face_engine.recognize(frame_rgb)
+
+                    frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+                    
+                    # Determinar color y etiqueta según resultado
+                    if result["face_detected"] and result["authorized"]:
+                        color = (0, 255, 0)  # Verde: reconocido
+                        label = result["name"] or "Reconocido"
+                        conf_str = f" ({result['confidence']:.0%})" if result["confidence"] else ""
+                    elif result["face_detected"]:
+                        color = (0, 0, 255)  # Rojo: desconocido
+                        label = "Desconocido"
+                        conf_str = f" ({result['confidence']:.0%})" if result["confidence"] else ""
+                    else:
+                        color = (0, 0, 255)  # Rojo: sin cara
+                        label = "Sin cara"
+                        conf_str = ""
+
+                    # Dibujar texto en frame
                     cv2.putText(
-                        frame_bgr, f"{label}{conf_str}",
-                        (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.0, color, 2
+                        frame_bgr,
+                        f"{label}{conf_str}",
+                        (20, 40),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        1.2,
+                        color,
+                        2,
                     )
 
-                _, buffer = cv2.imencode(".jpg", frame_bgr, [cv2.IMWRITE_JPEG_QUALITY, 75])
-                frame_bytes = buffer.tobytes()
+                    # Codificar a JPEG
+                    _, buffer = cv2.imencode(".jpg", frame_bgr, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                    frame_bytes = buffer.tobytes()
 
-                yield (
-                    b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"
-                    + frame_bytes
-                    + b"\r\n"
-                )
-                time.sleep(0.05)  # ~20 FPS para el stream
+                    # Enviar frame en formato MJPEG
+                    yield (
+                        b"--frame\r\n"
+                        b"Content-Type: image/jpeg\r\n"
+                        b"Content-Length: " + str(len(frame_bytes)).encode() + b"\r\n"
+                        b"\r\n" + frame_bytes + b"\r\n"
+                    )
+                    frame_count += 1
+                    time.sleep(0.033)  # ~30 FPS
 
-            except Exception as e:
-                logger.error(f"Error en stream: {e}")
-                time.sleep(0.5)
+                except Exception as e:
+                    logger.error(f"Error capturando frame en preview: {e}")
+                    time.sleep(0.1)
+        finally:
+            logger.info(f"Preview stream finalizado: {frame_count} frames enviados")
 
     return StreamingResponse(
         generate(), media_type="multipart/x-mixed-replace; boundary=frame"

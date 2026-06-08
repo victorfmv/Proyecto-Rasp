@@ -15,9 +15,10 @@ from datetime import datetime
 logger = logging.getLogger(__name__)
 
 # Carpeta donde se guardan las fotos originales de cada persona
-FACES_DIR = Path("faces")
+BASE_DIR = Path(__file__).resolve().parent.parent
+FACES_DIR = BASE_DIR / "faces"
 # Archivo donde se guardan los encodings calculados (para no recalcular siempre)
-ENCODINGS_FILE = Path("faces/encodings.pkl")
+ENCODINGS_FILE = FACES_DIR / "encodings.pkl"
 
 # Umbral de similitud: menor = más estricto. 0.5 es conservador, 0.6 es estándar.
 TOLERANCE = 0.5
@@ -129,9 +130,18 @@ class FaceEngine:
             self.known_encodings = []
             self.known_names = []
 
+        deleted_files = 0
+        if FACES_DIR.exists():
+            for photo_path in FACES_DIR.glob(f"{name}_*.jpg"):
+                try:
+                    photo_path.unlink()
+                    deleted_files += 1
+                except Exception as e:
+                    logger.warning(f"No se pudo borrar imagen {photo_path}: {e}")
+
         self._save_encodings()
-        logger.info(f"Cara eliminada: {name}")
-        return {"success": True, "removed": name}
+        logger.info(f"Cara eliminada: {name}, fotos borradas: {deleted_files}")
+        return {"success": True, "removed": name, "deleted_files": deleted_files}
 
     def list_faces(self) -> list[str]:
         """Lista nombres de todas las personas registradas."""
