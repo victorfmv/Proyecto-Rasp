@@ -66,6 +66,10 @@ last_recognition: dict = {
 }
 _state_lock = threading.Lock()
 
+# Lock para sincronizar acceso a face_recognition (dlib no es thread-safe)
+# Previene corrupción de memoria al usar face_recognition simultáneamente
+recognition_lock = threading.Lock()
+
 
 # ------------------------------------------------------------------
 # Hilo de reconocimiento continuo
@@ -86,7 +90,10 @@ def recognition_loop():
     while recognition_active.is_set():
         try:
             frame = camera.capture_rgb()
-            result = face_engine.recognize(frame)
+            
+            # Sincronizar acceso a face_recognition (dlib) - no es thread-safe
+            with recognition_lock:
+                result = face_engine.recognize(frame)
 
             with _state_lock:
                 last_recognition = {
@@ -210,7 +217,10 @@ async def register_face(name: str, file: UploadFile = File(...)):
         raise HTTPException(400, "El nombre debe tener al menos 2 caracteres.")
 
     image_bytes = await file.read()
-    result = face_engine.register_face(name.strip(), image_bytes)
+    
+    # Sincronizar acceso a face_recognition (dlib) - no es thread-safe
+    with recognition_lock:
+        result = face_engine.register_face(name.strip(), image_bytes)
 
     if not result["success"]:
         raise HTTPException(400, result["reason"])
@@ -235,7 +245,11 @@ async def recognize_photo(file: UploadFile = File(...)):
     image_bytes = await file.read()
     image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     frame = np.array(image)
-    result = face_engine.recognize(frame)
+    
+    # Sincronizar acceso a face_recognition (dlib) - no es thread-safe
+    with recognition_lock:
+        result = face_engine.recognize(frame)
+    
     return result
 
 

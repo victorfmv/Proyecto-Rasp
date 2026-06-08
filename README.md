@@ -98,3 +98,47 @@ void loop() {
   }
 }
 ```
+## Script de pruebas con picamera2 (fotos)
+```python
+from picamera2 import Picamera2
+
+# Inicializa la cámara usando la arquitectura libcamera
+picam = Picamera2()
+
+# Configura los parámetros básicos
+picam.configure(picam.create_preview_configuration(main={"size": (1920, 1080)}))
+
+# Inicia la captura
+picam.start()
+print("Capturando foto...")
+
+# Toma la foto y la guarda en el disco
+picam.capture_file("foto_libcamera.jpg")
+
+# Cierra la cámara limpiamente
+picam.stop()
+print("¡Foto guardada con éxito como foto_libcamera.jpg!")
+```
+## Script de pruebas con picamera2 (videos)
+```python
+import time
+from picamera2 import Picamera2
+
+# Inicializa la cámara
+picam = Picamera2()
+
+# Configura la resolución del video (Full HD)
+config = picam.create_video_configuration(main={"size": (1920, 1080)})
+picam.configure(config)
+
+# Inicia la cámara de fondo
+picam.start()
+print("Grabando video de 10 segundos con libcamera...")
+
+# Graba directo indicando el archivo y la duración en segundos (10 segundos)
+picam.start_and_record_video("video_libcamera.h264", duration=10)
+
+# Cierra la cámara limpiamente al terminar
+picam.stop()
+print("¡Grabación finalizada! Archivo guardado como video_libcamera.h264")
+```

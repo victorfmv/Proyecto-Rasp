@@ -8,9 +8,21 @@ env/
 venv/
 .venv/
 
+# Scripts de prueba
+prueba_foto.py
+prueba_video.py
+
 # Datos dinámicos del proyecto (Bases de datos y Logs)
+faces/
 logs/access_log.db
 logs/app.log
+
+# Archivos de prueba multimedia
+*.h264
+*.mp4
+*.mkv
+*.jpg
+*.jpeg
 
 # Configuraciones de editores/IDE (Opcional pero recomendado)
 .vscode/
