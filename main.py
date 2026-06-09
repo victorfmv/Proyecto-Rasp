@@ -1,42 +1,42 @@
+# main.py
 """
-main.py
-Servidor principal — Smart Lock con reconocimiento facial.
-Equipo: [sus nombres aquí]
+Smart Lock — Servidor Principal
+Arquitectura basada en eventos pasivos; sin polling de CPU en reposo.
 
 Endpoints:
-  GET  /              → estado del sistema
-  GET  /status        → estado de cerradura + cámara + serial
-  POST /unlock/manual → abrir manualmente desde la UI
-  POST /lock          → cerrar manualmente
-  POST /faces/register → registrar nueva cara (sube foto)
+  GET  /                      → estado del sistema
+  GET  /status                → estado de cerradura + cámara + serial
+  GET  /recognize             → interfaz web: stream en vivo + resultado JSON
+  POST /unlock/manual         → abrir manualmente desde la UI
+  POST /faces/register        → registrar nueva cara (sube foto)
   POST /faces/register/camera → registrar cara usando la cámara en vivo
-  DELETE /faces/{name} → eliminar cara registrada
-  GET  /faces         → listar caras registradas
-  POST /recognize     → reconocer una cara usando la cámara en vivo
-  GET  /stream        → MJPEG stream de la cámara en vivo con overlay
-  GET  /stream/preview → preview de 10 segundos con reconocimiento y overlay de color
-  GET  /logs          → últimos registros de acceso
-  GET  /logs/stats    → estadísticas
+  DELETE /faces/{name}        → eliminar cara registrada
+  GET  /faces                 → listar caras registradas
+  GET  /stream                → MJPEG stream de la cámara en vivo
+  POST /stream/stop           → detener el stream activo
+  GET  /stream/preview        → preview de N segundos con reconocimiento y overlay
+  GET  /logs                  → últimos registros de acceso
+  GET  /logs/stats            → estadísticas
 """
 
-import io
 import time
 import logging
 import threading
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 
-import numpy as np
-from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import StreamingResponse, JSONResponse
+import cv2
+from fastapi import FastAPI, Request, UploadFile, File, HTTPException
+from fastapi.responses import HTMLResponse, StreamingResponse
 
 from app.face_engine import FaceEngine
 from app.camera import Camera
 from app.lock_controller import LockController
 from app import database as db
 
-# ------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # Logging
-# ------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -47,293 +47,458 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ------------------------------------------------------------------
-# Estado global del sistema
-# ------------------------------------------------------------------
-face_engine: FaceEngine = None
-camera: Camera = None
-lock: LockController = None
 
-# Hilo de reconocimiento continuo
-recognition_thread: threading.Thread = None
-recognition_active = threading.Event()
+# ---------------------------------------------------------------------------
+# Estado de la Aplicación
+# ---------------------------------------------------------------------------
+@dataclass
+class AppState:
+    """Agrupa todos los recursos compartidos del sistema."""
 
-# Última detección (shared entre hilo y endpoints)
-last_recognition: dict = {
-    "name": None,
-    "authorized": False,
-    "confidence": None,
-    "face_detected": False,
-    "timestamp": None,
-}
-_state_lock = threading.Lock()
+    face_engine: FaceEngine
+    camera: Camera
+    lock: LockController
 
-# Lock para sincronizar acceso a face_recognition (dlib no es thread-safe)
-# Previene corrupción de memoria al usar face_recognition simultáneamente
-recognition_lock = threading.Lock()
+    # Mutex para dlib (no es thread-safe)
+    recognition_lock: threading.Lock = field(default_factory=threading.Lock)
 
-# Control de streaming en vivo
-streaming_stop = threading.Event()
-stream_count = 0
-stream_count_lock = threading.Lock()
+    # Se activa en el lifespan shutdown para que generadores de stream terminen
+    shutdown_event: threading.Event = field(default_factory=threading.Event)
 
+    # Se activa con POST /stream/stop; se limpia cuando /stream recibe conexión nueva
+    streaming_stop: threading.Event = field(default_factory=threading.Event)
 
-def _increment_stream_count():
-    global stream_count
-    with stream_count_lock:
-        stream_count += 1
+    # Último resultado de reconocimiento (leído por GET /recognize/result)
+    _recog_ready: bool = field(default=False)
+    _recog_result: dict = field(default_factory=dict)
+    _recog_result_lock: threading.Lock = field(default_factory=threading.Lock)
 
+    # Contador de streams activos (para /status)
+    _stream_count: int = field(default=0, init=False)
+    _stream_count_lock: threading.Lock = field(default_factory=threading.Lock)
 
-def _decrement_stream_count():
-    global stream_count
-    with stream_count_lock:
-        if stream_count > 0:
-            stream_count -= 1
+    # ------------------------------------------------------------------ #
+    # Resultado del reconocimiento                                          #
+    # ------------------------------------------------------------------ #
 
+    def recog_begin(self) -> None:
+        """Marca el inicio de un ciclo de reconocimiento (limpia resultado anterior)."""
+        with self._recog_result_lock:
+            self._recog_ready = False
+            self._recog_result = {}
 
-# ------------------------------------------------------------------
-# Hilo de reconocimiento continuo
-# ------------------------------------------------------------------
+    def recog_end(self, result: dict) -> None:
+        """Almacena el resultado final y lo marca como disponible."""
+        with self._recog_result_lock:
+            self._recog_result = result
+            self._recog_ready = True
 
-def recognition_loop():
-    """
-    Corre en background. Captura frames continuamente y evalúa si hay caras.
-    Cuando detecta cara autorizada → abre la cerradura y registra en DB.
-    """
-    global last_recognition
-    logger.info("Hilo de reconocimiento iniciado.")
+    def recog_get(self) -> dict:
+        """Retorna {"ready": false} o {"ready": true, ...resultado...}."""
+        with self._recog_result_lock:
+            if self._recog_ready:
+                return {"ready": True, **self._recog_result}
+            return {"ready": False}
 
-    # Cooldown: no abrir la cerradura más de 1 vez cada N segundos
-    COOLDOWN = 8.0
-    last_open_time = 0.0
+    # ------------------------------------------------------------------ #
+    # Contador de streams                                                   #
+    # ------------------------------------------------------------------ #
 
-    while recognition_active.is_set():
+    def increment_streams(self) -> None:
+        with self._stream_count_lock:
+            self._stream_count += 1
+
+    def decrement_streams(self) -> None:
+        with self._stream_count_lock:
+            if self._stream_count > 0:
+                self._stream_count -= 1
+
+    @property
+    def active_streams(self) -> int:
+        with self._stream_count_lock:
+            return self._stream_count
+
+    # ------------------------------------------------------------------ #
+    # Helpers de cámara                                                    #
+    # ------------------------------------------------------------------ #
+
+    def warmup_camera(self, frames: int = 5) -> None:
+        """Drena frames residuales del buffer para estabilizar AEC/AGC."""
         try:
-            frame = camera.capture_rgb()
-            
-            # Sincronizar acceso a face_recognition (dlib) - no es thread-safe
-            with recognition_lock:
-                result = face_engine.recognize(frame)
-
-            with _state_lock:
-                last_recognition = {
-                    **result,
-                    "timestamp": time.strftime("%H:%M:%S"),
-                }
-
-            if result["authorized"] and result["face_detected"]:
-                now = time.time()
-                if now - last_open_time > COOLDOWN:
-                    last_open_time = now
-                    logger.info(f"Cara autorizada: {result['name']} (confianza {result['confidence']})")
-                    lock_result = lock.open_lock()
-                    db.log_access(
-                        name=result["name"],
-                        authorized=True,
-                        confidence=result["confidence"],
-                        action=lock_result.get("action"),
-                    )
-
-            elif result["face_detected"] and not result["authorized"]:
-                db.log_access(
-                    name=result.get("name", "Desconocido"),
-                    authorized=False,
-                    confidence=result.get("confidence"),
-                    action="denied",
-                )
-
-        except Exception as e:
-            logger.error(f"Error en hilo de reconocimiento: {e}")
-            time.sleep(1)
-
-        # ~10 FPS de evaluación (ajustable)
-        time.sleep(0.1)
-
-    logger.info("Hilo de reconocimiento detenido.")
+            for _ in range(frames):
+                self.camera.capture_rgb()
+                time.sleep(0.05)
+        except Exception as exc:
+            logger.warning(f"[WARMUP] Error: {exc}")
 
 
-# ------------------------------------------------------------------
-# Lifespan (startup / shutdown)
-# ------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Hilos de soporte
+# ---------------------------------------------------------------------------
+
+def _camera_keepalive_loop(ctx: AppState) -> None:
+    """
+    Captura un frame cada 3 segundos para mantener AEC/AGC estabilizado.
+    Consumo de CPU mínimo: solo lectura del buffer, sin reconocimiento facial.
+    """
+    while not ctx.shutdown_event.wait(timeout=3.0):
+        try:
+            ctx.camera.capture_rgb()
+        except Exception:
+            pass
+
+
+# ---------------------------------------------------------------------------
+# Ciclo de vida
+# ---------------------------------------------------------------------------
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global face_engine, camera, lock, recognition_thread
-
     logger.info("=== Iniciando Smart Lock ===")
+
     db.init_db()
 
     face_engine = FaceEngine()
     camera = Camera(width=640, height=480)
-    lock = LockController()  # detecta puerto automáticamente
+    lock = LockController()
 
-    # Arrancar hilo de reconocimiento continuo
-    recognition_active.set()
-    recognition_thread = threading.Thread(target=recognition_loop, daemon=True)
-    recognition_thread.start()
+    ctx = AppState(face_engine=face_engine, camera=camera, lock=lock)
 
-    logger.info("Sistema listo.")
+    threading.Thread(
+        target=_camera_keepalive_loop,
+        args=(ctx,),
+        daemon=True,
+        name="camera-keepalive",
+    ).start()
+
+    app.state.ctx = ctx
+    logger.info("Sistema listo y en espera de eventos.")
+
     yield
 
-    # Shutdown
     logger.info("=== Apagando Smart Lock ===")
-    recognition_active.clear()
-    if recognition_thread:
-        recognition_thread.join(timeout=3)
+    ctx.shutdown_event.set()
     lock.close_serial()
     camera.release()
 
 
-# ------------------------------------------------------------------
-# App FastAPI
-# ------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Aplicación
+# ---------------------------------------------------------------------------
 
 app = FastAPI(
     title="Smart Lock — Reconocimiento Facial",
     description="API de cerradura inteligente con reconocimiento facial local.",
-    version="1.0.0",
+    version="2.5.0",
     lifespan=lifespan,
 )
 
 
-# ------------------------------------------------------------------
-# Endpoints
-# ------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _get_ctx(request: Request) -> AppState:
+    return request.app.state.ctx
+
+
+# ---------------------------------------------------------------------------
+# Endpoints — Información general
+# ---------------------------------------------------------------------------
 
 @app.get("/")
-def root():
+def root(request: Request):
+    ctx = _get_ctx(request)
     return {
         "project": "Smart Lock",
-        "status": "online",
-        "registered_faces": len(face_engine.list_faces()),
-        "lock_connected": lock.connected,
+        "status": "ready",
+        "registered_faces": len(ctx.face_engine.list_faces()),
+        "lock_connected": ctx.lock.connected,
     }
 
 
 @app.get("/status")
-def get_status():
-    lock_status = lock.get_status()
-    with _state_lock:
-        recognition = dict(last_recognition)
-    with stream_count_lock:
-        active_streams = stream_count
+def get_status(request: Request):
+    ctx = _get_ctx(request)
     return {
-        "lock": lock_status,
+        "lock": ctx.lock.get_status(),
         "camera": {
             "active": True,
-            "streaming": active_streams > 0,
-            "streams_active": active_streams,
+            "streams_active": ctx.active_streams,
         },
-        "last_recognition": recognition,
-        "registered_faces": face_engine.list_faces(),
+        "registered_faces": ctx.face_engine.list_faces(),
     }
 
 
+# ---------------------------------------------------------------------------
+# Endpoints — Reconocimiento (interfaz web + sub-recursos ocultos)
+# ---------------------------------------------------------------------------
+
+_RECOGNIZE_HTML = """\
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Smart Lock — Reconocimiento</title>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:system-ui,sans-serif;background:#0d1117;color:#e6edf3;
+         display:flex;flex-direction:column;align-items:center;padding:32px 16px}
+    h1{font-size:1.3rem;font-weight:600;margin-bottom:16px;color:#58a6ff}
+    img{width:640px;max-width:100%;border:2px solid #30363d;border-radius:6px;display:block}
+    #status{margin-top:10px;font-size:14px;color:#8b949e}
+    pre{margin-top:12px;background:#161b22;border:1px solid #30363d;border-radius:6px;
+        padding:16px;font-size:13px;min-height:56px;width:640px;max-width:100%;white-space:pre-wrap}
+    .ok{color:#3fb950}.deny{color:#f85149}
+  </style>
+</head>
+<body>
+  <h1>Smart Lock — Reconocimiento Facial</h1>
+  <img src="/recognize/stream" alt="Cámara en vivo" id="cam">
+  <p id="status">Reconociendo&hellip;</p>
+  <pre id="json">—</pre>
+  <script>
+    const poll = setInterval(async () => {
+      try {
+        const r = await fetch('/recognize/result');
+        const d = await r.json();
+        if (!d.ready) return;
+        clearInterval(poll);
+        const { ready, ...result } = d;
+        document.getElementById('json').textContent = JSON.stringify(result, null, 2);
+        if (result.authorized) {
+          document.getElementById('json').className = 'ok';
+          document.getElementById('status').textContent = '✓ Acceso concedido: ' + result.name;
+        } else {
+          document.getElementById('json').className = 'deny';
+          document.getElementById('status').textContent = result.face_detected
+            ? '✗ Acceso denegado'
+            : '— Tiempo agotado sin cara detectada';
+        }
+      } catch(e) {}
+    }, 500);
+  </script>
+</body>
+</html>"""
+
+
+@app.get(
+    "/recognize",
+    response_class=HTMLResponse,
+    summary="Reconocimiento facial (interfaz web + stream)",
+    description=(
+        "Abre la interfaz en el navegador: muestra el stream en vivo con overlays "
+        "de reconocimiento y el resultado JSON al finalizar. "
+        "Envía REQ_RECOGNITION al Arduino al iniciar."
+    ),
+)
+def recognize_page():
+    return HTMLResponse(_RECOGNIZE_HTML)
+
+
+@app.get("/recognize/stream", include_in_schema=False)
+def recognize_stream(request: Request, timeout: int = 10):
+    """Stream MJPEG de reconocimiento. Usado internamente por la página /recognize."""
+    ctx = _get_ctx(request)
+
+    if not 1 <= timeout <= 30:
+        raise HTTPException(400, "El timeout debe estar entre 1 y 30 segundos.")
+
+    def generate():
+        ctx.recog_begin()
+        ctx.lock.send_recognition_start()
+
+        final_result: dict = {
+            "authorized": False,
+            "name": None,
+            "confidence": None,
+            "face_detected": False,
+            "reason": "No se detectó ningún rostro en el tiempo límite.",
+        }
+
+        try:
+            deadline = time.time() + timeout
+            denied_logged = False
+            logger.info(f"[RECOGNIZE] Stream iniciado ({timeout}s).")
+
+            while time.time() < deadline and not ctx.shutdown_event.is_set():
+                try:
+                    frame_rgb = ctx.camera.capture_rgb()
+
+                    with ctx.recognition_lock:
+                        result = ctx.face_engine.recognize(frame_rgb)
+
+                    frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+                    conf_str = (
+                        f" ({result['confidence']:.0%})" if result.get("confidence") else ""
+                    )
+
+                    if result["face_detected"] and result["authorized"]:
+                        lock_result = ctx.lock.open_lock()
+                        db.log_access(
+                            name=result["name"],
+                            authorized=True,
+                            confidence=result["confidence"],
+                            action=lock_result.get("action", "face_open"),
+                        )
+                        logger.info(f"[RECOGNIZE] Acceso concedido: {result['name']}")
+                        final_result = result
+
+                        label = f"ACCESO CONCEDIDO: {result['name']}{conf_str}"
+                        cv2.putText(
+                            frame_bgr, label, (20, 40),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2,
+                        )
+                        _, buf = cv2.imencode(
+                            ".jpg", frame_bgr, [cv2.IMWRITE_JPEG_QUALITY, 85]
+                        )
+                        success_frame = (
+                            b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"
+                            + buf.tobytes() + b"\r\n"
+                        )
+                        end_display = time.time() + 1.5
+                        while time.time() < end_display:
+                            yield success_frame
+                            time.sleep(0.1)
+                        return
+
+                    elif result["face_detected"] and not result["authorized"]:
+                        if not denied_logged:
+                            db.log_access(
+                                name="Desconocido",
+                                authorized=False,
+                                confidence=result.get("confidence"),
+                                action="denied",
+                            )
+                            logger.warning("[RECOGNIZE] Acceso denegado.")
+                            denied_logged = True
+                        final_result = result
+                        cv2.putText(
+                            frame_bgr, f"ACCESO DENEGADO{conf_str}", (20, 40),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2,
+                        )
+
+                    else:
+                        denied_logged = False
+                        cv2.putText(
+                            frame_bgr, "Buscando rostro...", (20, 40),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 165, 255), 2,
+                        )
+
+                    _, buf = cv2.imencode(".jpg", frame_bgr, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                    yield (
+                        b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"
+                        + buf.tobytes() + b"\r\n"
+                    )
+                    time.sleep(0.04)
+
+                except Exception as exc:
+                    logger.error(f"[RECOGNIZE] Error en frame: {exc}")
+                    time.sleep(0.1)
+
+            logger.info("[RECOGNIZE] Stream finalizado.")
+
+        finally:
+            ctx.recog_end(final_result)
+
+    return StreamingResponse(generate(), media_type="multipart/x-mixed-replace; boundary=frame")
+
+
+@app.get("/recognize/result", include_in_schema=False)
+def recognize_result(request: Request):
+    """Retorna el último resultado de reconocimiento. Usado internamente por /recognize."""
+    ctx = _get_ctx(request)
+    return ctx.recog_get()
+
+
+# ---------------------------------------------------------------------------
+# Endpoints — Control de chapa
+# ---------------------------------------------------------------------------
+
+@app.post("/unlock/manual")
+def manual_unlock(request: Request):
+    ctx = _get_ctx(request)
+    result = ctx.lock.open_lock()
+    if result["success"]:
+        db.log_access(
+            name="Manual (UI)",
+            authorized=True,
+            confidence=None,
+            action="manual_open",
+        )
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Endpoints — Gestión de caras
+# ---------------------------------------------------------------------------
+
 @app.get("/faces")
-def list_faces():
-    return {"faces": face_engine.list_faces()}
+def list_faces(request: Request):
+    ctx = _get_ctx(request)
+    return {"faces": ctx.face_engine.list_faces()}
 
 
 @app.post("/faces/register")
-async def register_face(name: str, file: UploadFile = File(...)):
-    """
-    Registra una nueva cara. Sube una foto con el parámetro ?name=NombrePersona
-    """
+async def register_face(request: Request, name: str, file: UploadFile = File(...)):
+    ctx = _get_ctx(request)
+
     if not name or len(name.strip()) < 2:
         raise HTTPException(400, "El nombre debe tener al menos 2 caracteres.")
 
     image_bytes = await file.read()
-    
-    # Sincronizar acceso a face_recognition (dlib) - no es thread-safe
-    with recognition_lock:
-        result = face_engine.register_face(name.strip(), image_bytes)
+
+    with ctx.recognition_lock:
+        result = ctx.face_engine.register_face(name.strip(), image_bytes)
 
     if not result["success"]:
         raise HTTPException(400, result["reason"])
-
     return result
 
 
 @app.post("/faces/register/camera")
-def register_face_camera(name: str):
-    """
-    Registra una nueva cara usando una captura desde la cámara en vivo.
-    """
+def register_face_from_camera(request: Request, name: str):
+    """Registra una cara capturando directamente desde la Pi Camera."""
+    ctx = _get_ctx(request)
+
     if not name or len(name.strip()) < 2:
         raise HTTPException(400, "El nombre debe tener al menos 2 caracteres.")
 
     try:
-        frame_rgb = camera.capture_rgb()
-    except Exception as e:
-        logger.error(f"Error capturando imagen para registro: {e}")
-        raise HTTPException(500, "No se pudo capturar la imagen desde la cámara.")
+        ctx.warmup_camera(frames=10)
+        frame_rgb = ctx.camera.capture_rgb()
+    except Exception as exc:
+        logger.error(f"Error en captura de registro: {exc}")
+        raise HTTPException(500, "No se pudo capturar una imagen estable de la cámara.")
 
-    import cv2
-    _, buffer = cv2.imencode('.jpg', cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 85])
+    frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+    _, buffer = cv2.imencode(".jpg", frame_bgr, [cv2.IMWRITE_JPEG_QUALITY, 85])
     image_bytes = buffer.tobytes()
 
-    with recognition_lock:
-        result = face_engine.register_face(name.strip(), image_bytes)
+    with ctx.recognition_lock:
+        result = ctx.face_engine.register_face(name.strip(), image_bytes)
 
     if not result["success"]:
         raise HTTPException(400, result["reason"])
-
     return result
 
 
 @app.delete("/faces/{name}")
-def delete_face(name: str):
-    result = face_engine.remove_face(name)
+def delete_face(request: Request, name: str):
+    ctx = _get_ctx(request)
+    result = ctx.face_engine.remove_face(name)
     if not result["success"]:
         raise HTTPException(404, result["reason"])
     return result
 
 
-@app.post("/recognize")
-def recognize_photo():
-    """
-    Reconoce una cara usando la cámara en vivo durante un máximo de 5 segundos.
-    """
-    timeout = 5.0
-    deadline = time.time() + timeout
-    last_result = None
-
-    while time.time() < deadline:
-        try:
-            frame = camera.capture_rgb()
-        except Exception as e:
-            logger.error(f"Error capturando imagen para reconocimiento: {e}")
-            raise HTTPException(500, "No se pudo capturar la imagen desde la cámara.")
-
-        with recognition_lock:
-            result = face_engine.recognize(frame)
-
-        last_result = result
-        if result["face_detected"]:
-            return result
-
-        time.sleep(0.1)
-
-    return last_result or {
-        "authorized": False,
-        "name": None,
-        "confidence": None,
-        "face_detected": False,
-        "reason": "No se detectó ninguna cara durante el tiempo de espera.",
-    }
-
-
-@app.post("/unlock/manual")
-def manual_unlock():
-    """Abre la cerradura manualmente desde la UI. El cierre es automático a los 5s."""
-    result = lock.open_lock()
-    if result["success"]:
-        db.log_access(name="Manual (UI)", authorized=True, confidence=None, action="manual_open")
-    return result
-
+# ---------------------------------------------------------------------------
+# Endpoints — Logs
+# ---------------------------------------------------------------------------
 
 @app.get("/logs")
-def get_logs(limit: int = 50):
+def get_logs(request: Request, limit: int = 50):
     return {"logs": db.get_recent_logs(limit)}
 
 
@@ -342,141 +507,108 @@ def get_stats():
     return db.get_stats()
 
 
+# ---------------------------------------------------------------------------
+# Endpoints — Streaming simple (sin reconocimiento)
+# ---------------------------------------------------------------------------
+
 @app.get("/stream")
-def video_stream():
-    """
-    MJPEG stream de la cámara en tiempo real.
-    Abrir en browser: http://IP_RASP:8000/stream
-    """
-    streaming_stop.clear()
-    _increment_stream_count()
+def video_stream(request: Request):
+    """MJPEG stream simple sin anotaciones. Detener con POST /stream/stop."""
+    ctx = _get_ctx(request)
+    ctx.streaming_stop.clear()
 
     def generate():
-        import cv2
+        ctx.increment_streams()
         try:
-            while not streaming_stop.is_set():
+            while not ctx.streaming_stop.is_set() and not ctx.shutdown_event.is_set():
                 try:
-                    frame_rgb = camera.capture_rgb()
-                    with _state_lock:
-                        recog = dict(last_recognition)
-
-                    # Overlay con resultado del reconocimiento
+                    frame_rgb = ctx.camera.capture_rgb()
                     frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
-
-                    if recog["face_detected"]:
-                        color = (0, 255, 0) if recog["authorized"] else (0, 0, 255)
-                        label = recog["name"] or "Desconocido"
-                        conf_str = f" ({recog['confidence']:.0%})" if recog["confidence"] else ""
-                        cv2.putText(
-                            frame_bgr, f"{label}{conf_str}",
-                            (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.0, color, 2
-                        )
-
-                    _, buffer = cv2.imencode(".jpg", frame_bgr, [cv2.IMWRITE_JPEG_QUALITY, 75])
-                    frame_bytes = buffer.tobytes()
-
+                    _, buf = cv2.imencode(".jpg", frame_bgr, [cv2.IMWRITE_JPEG_QUALITY, 75])
                     yield (
-                        b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"
-                        + frame_bytes
-                        + b"\r\n"
+                        b"--frame\r\n"
+                        b"Content-Type: image/jpeg\r\n\r\n"
+                        + buf.tobytes() + b"\r\n"
                     )
-                    time.sleep(0.05)  # ~20 FPS para el stream
-
-                except Exception as e:
-                    logger.error(f"Error en stream: {e}")
+                    time.sleep(0.05)
+                except Exception as exc:
+                    logger.error(f"Error en stream: {exc}")
                     time.sleep(0.5)
         except GeneratorExit:
             pass
         finally:
-            _decrement_stream_count()
-            logger.info("Stream cerrado")
+            ctx.decrement_streams()
+            logger.info("Stream cerrado.")
 
-    return StreamingResponse(
-        generate(), media_type="multipart/x-mixed-replace; boundary=frame"
-    )
+    return StreamingResponse(generate(), media_type="multipart/x-mixed-replace; boundary=frame")
 
 
 @app.post("/stream/stop")
-def stop_stream():
-    """Detiene la transmisión en vivo de la cámara (solo afecta a /stream)."""
-    streaming_stop.set()
-    return {"success": True, "message": "Las nuevas conexiones se cerrarán progresivamente."}
+def stop_stream(request: Request):
+    """Detiene el stream MJPEG activo."""
+    ctx = _get_ctx(request)
+    ctx.streaming_stop.set()
+    return {"success": True, "message": "Stream detenido."}
 
 
 @app.get("/stream/preview")
-def preview_stream(duration: int = 10):
-    """Activa la cámara y transmite por 10 segundos con reconocimiento de rostro.
-    Accesible en: http://localhost:8000/stream/preview
+def preview_stream(request: Request, duration: int = 10):
     """
-    if duration <= 0 or duration > 30:
+    Stream MJPEG con reconocimiento facial superpuesto.
+    NO abre la chapa. Duración máxima: 30 segundos.
+    """
+    ctx = _get_ctx(request)
+
+    if not 1 <= duration <= 30:
         raise HTTPException(400, "La duración debe estar entre 1 y 30 segundos.")
 
     def generate():
-        import cv2
         deadline = time.time() + duration
-        frame_count = 0
-        try:
-            while time.time() < deadline:
-                try:
-                    frame_rgb = camera.capture_rgb()
-                    with recognition_lock:
-                        result = face_engine.recognize(frame_rgb)
+        logger.info(f"[PREVIEW] Iniciando stream de {duration}s.")
 
-                    frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
-                    
-                    # Determinar color y etiqueta según resultado
-                    if result["face_detected"] and result["authorized"]:
-                        color = (0, 255, 0)  # Verde: reconocido
-                        label = result["name"] or "Reconocido"
-                        conf_str = f" ({result['confidence']:.0%})" if result["confidence"] else ""
-                    elif result["face_detected"]:
-                        color = (0, 0, 255)  # Rojo: desconocido
-                        label = "Desconocido"
-                        conf_str = f" ({result['confidence']:.0%})" if result["confidence"] else ""
-                    else:
-                        color = (0, 0, 255)  # Rojo: sin cara
-                        label = "Sin cara"
-                        conf_str = ""
+        while time.time() < deadline and not ctx.shutdown_event.is_set():
+            try:
+                frame_rgb = ctx.camera.capture_rgb()
 
-                    # Dibujar texto en frame
-                    cv2.putText(
-                        frame_bgr,
-                        f"{label}{conf_str}",
-                        (20, 40),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        1.2,
-                        color,
-                        2,
-                    )
+                with ctx.recognition_lock:
+                    result = ctx.face_engine.recognize(frame_rgb)
 
-                    # Codificar a JPEG
-                    _, buffer = cv2.imencode(".jpg", frame_bgr, [cv2.IMWRITE_JPEG_QUALITY, 80])
-                    frame_bytes = buffer.tobytes()
+                frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
 
-                    # Enviar frame en formato MJPEG
-                    yield (
-                        b"--frame\r\n"
-                        b"Content-Type: image/jpeg\r\n"
-                        b"Content-Length: " + str(len(frame_bytes)).encode() + b"\r\n"
-                        b"\r\n" + frame_bytes + b"\r\n"
-                    )
-                    frame_count += 1
-                    time.sleep(0.033)  # ~30 FPS
+                if result["face_detected"]:
+                    color = (0, 255, 0) if result["authorized"] else (0, 0, 255)
+                    conf = f" ({result['confidence']:.0%})" if result["confidence"] else ""
+                    label = (result["name"] if result["authorized"] else "Desconocido") + conf
+                else:
+                    color = (0, 0, 255)
+                    label = "Buscando rostro..."
 
-                except Exception as e:
-                    logger.error(f"Error capturando frame en preview: {e}")
-                    time.sleep(0.1)
-        finally:
-            logger.info(f"Preview stream finalizado: {frame_count} frames enviados")
+                cv2.putText(
+                    frame_bgr, label,
+                    (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.0, color, 2,
+                )
 
-    return StreamingResponse(
-        generate(), media_type="multipart/x-mixed-replace; boundary=frame"
-    )
+                _, buf = cv2.imencode(".jpg", frame_bgr, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                yield (
+                    b"--frame\r\n"
+                    b"Content-Type: image/jpeg\r\n"
+                    b"Content-Length: " + str(len(buf)).encode() + b"\r\n"
+                    b"\r\n" + buf.tobytes() + b"\r\n"
+                )
+                time.sleep(0.04)
+
+            except Exception as exc:
+                logger.error(f"Error en preview: {exc}")
+                time.sleep(0.1)
+
+        logger.info("[PREVIEW] Stream finalizado.")
+
+    return StreamingResponse(generate(), media_type="multipart/x-mixed-replace; boundary=frame")
 
 
-# ------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # Entry point
-# ------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     import uvicorn

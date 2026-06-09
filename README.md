@@ -5,96 +5,112 @@ Integración de una cerradura magnética controlada por el arduino y una cámara
 ## Código del arduino
 ```cpp
 // ------------------------------------------------------------------
-// Smart Lock - Controlador de Hardware No Bloqueante (Definitivo)
+// Smart Lock - Controlador de Hardware por Eventos (Sin Bloqueo)
 // ------------------------------------------------------------------
 
 // Definición de Pines
 const uint8_t PIN_RELE = 7; 
 const uint8_t LED_RED = 8;
 const uint8_t LED_GREEN = 9;
-const uint8_t BUTTON_INSIDE = 10;
+const uint8_t BUTTON_INSIDE = 10;  // Botón para salir (abre directo)
+const uint8_t BUTTON_OUTSIDE = 11; // NUEVO: Botón para pedir reconocimiento (activa cámara)
 
 // Variables de Control de Tiempo
 unsigned long tiempoApertura = 0;
 const unsigned long COOLDOWN_ABIERTO = 5000; // 5 segundos de apertura
 bool lockAbierto = false;
 
-// Variable para el control del botón físico
-bool botonPresionadoAntes = false;
+// Banderas para control de pulsaciones únicas (Debounce)
+bool insidePresionadoAntes = false;
+bool outsidePresionadoAntes = false;
 
 void setup() {
-  // Inicializar comunicación serial a 9600 baudios (coincide con la Raspberry Pi)
   Serial.begin(9600);
   
-  // Configuración de Pines
   pinMode(PIN_RELE, OUTPUT);
   pinMode(LED_RED, OUTPUT);
   pinMode(LED_GREEN, OUTPUT);
   
-  // INPUT_PULLUP activa la resistencia interna de 20k, el botón debe ir a GND
+  // Ambos botones usan la resistencia pull-up interna del Arduino
   pinMode(BUTTON_INSIDE, INPUT_PULLUP);
+  pinMode(BUTTON_OUTSIDE, INPUT_PULLUP);
   
-  // Estado inicial del sistema por defecto (Puerta Bloqueada)
-  // Nota: Como tu relé se activa con LOW, HIGH significa "apagado / sin energía"
+  // Estado inicial: Seguro puesto
   digitalWrite(PIN_RELE, HIGH);
   digitalWrite(LED_RED, HIGH);
   digitalWrite(LED_GREEN, LOW);
   
-  // Enviar señal de sincronización inicial al backend en Python
   Serial.println("ARDUINO_LISTO");
 }
 
-// Función inline para abrir la cerradura
 inline void open_lock() {
-  digitalWrite(PIN_RELE, LOW);     // Activa el relé (deja pasar corriente a la cerradura)
-  digitalWrite(LED_RED, LOW);      // Apaga LED rojo
-  digitalWrite(LED_GREEN, HIGH);   // Enciende LED verde
+  digitalWrite(PIN_RELE, LOW);
+  digitalWrite(LED_RED, LOW);
+  digitalWrite(LED_GREEN, HIGH);
   lockAbierto = true;
-  tiempoApertura = millis();       // Guarda el tiempo exacto en que se abrió
+  tiempoApertura = millis();
 }
 
-// Función inline para cerrar la cerradura
 inline void close_lock() {
-  digitalWrite(PIN_RELE, HIGH);    // Desactiva el relé (bloquea la cerradura)
-  digitalWrite(LED_RED, HIGH);     // Enciende LED rojo
-  digitalWrite(LED_GREEN, LOW);    // Apaga LED verde
+  digitalWrite(PIN_RELE, HIGH);
+  digitalWrite(LED_RED, HIGH);
+  digitalWrite(LED_GREEN, LOW);
   lockAbierto = false;
 }
 
+// NUEVO: Función no bloqueante para parpadear el LED rojo 2 veces
+void blink_red_indicator() {
+  for(int i = 0; i < 2; i++) {
+    digitalWrite(LED_RED, LOW);
+    delay(150);
+    digitalWrite(LED_RED, HIGH);
+    delay(150);
+  }
+}
+
 void loop() {
-  // 1. TEMPORIZADOR ASÍNCRONO (Maneja el cierre automático sin congelar el programa)
+  // 1. Temporizador asíncrono para el cierre automático
   if (lockAbierto && (millis() - tiempoApertura >= COOLDOWN_ABIERTO)) {
     close_lock();
     Serial.println("OK_CERRADO");
   }
 
-  // 2. LECTURA SERIAL (Escucha peticiones de apertura de la Raspberry Pi)
+  // 2. Lectura Serial (Comandos desde la Raspberry Pi)
   if (Serial.available() > 0) {
     String comando = Serial.readStringUntil('\n');
-    comando.trim(); // Limpia saltos de línea (\r\n) y espacios externos
+    comando.trim(); 
 
     if (comando == "OPEN") {
       open_lock();
       Serial.println("OK_ABIERTO");   
-      
+    } else if (comando == "BLINK_RED") {
+      blink_red_indicator(); // La Pi nos pide avisar que la cámara está encendida
     } else if (comando.length() > 0) {
-      // Envío de errores en caso de recibir bytes basura o comandos no válidos
       Serial.print("ERROR_COMANDO_DESCONOCIDO:");
       Serial.println(comando);
     }
   }
 
-  // 3. BOTÓN FÍSICO DE SALIDA (Control por flanco de bajada / Pulsación única)
-  // Al usar INPUT_PULLUP, digitalRead devuelve LOW (false) cuando el botón se presiona
-  bool botonActual = !digitalRead(BUTTON_INSIDE); 
-
-  if (botonActual && !botonPresionadoAntes) {
+  // 3. Botón Interno (Flanco de bajada - Salida Directa Inmediata)
+  bool botonInsideActual = !digitalRead(BUTTON_INSIDE);
+  if (botonInsideActual && !insidePresionadoAntes) {
     open_lock();
-    botonPresionadoAntes = true;        // Bloquea repeticiones consecutivas en el bucle
-    delay(50);                          // Pequeño antirrebote de hardware (debounce)
-  } 
-  else if (!botonActual) {
-    botonPresionadoAntes = false;       // Libera el seguro cuando la persona suelta el botón
+    Serial.println("OK_BOTON_INTERNO");
+    insidePresionadoAntes = true;
+    delay(5);
+  } else if (!botonInsideActual) {
+    insidePresionadoAntes = false;
+  }
+
+  // 4. NUEVO: Botón Externo (Solicitud de Reconocimiento Facial)
+  bool botonOutsideActual = !digitalRead(BUTTON_OUTSIDE);
+  if (botonOutsideActual && !outsidePresionadoAntes) {
+    // Le avisamos a la Raspberry Pi que alguien quiere entrar
+    Serial.println("REQ_RECOGNITION"); 
+    outsidePresionadoAntes = true;
+    delay(5);
+  } else if (!botonOutsideActual) {
+    outsidePresionadoAntes = false;
   }
 }
 ```
