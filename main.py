@@ -226,7 +226,10 @@ def root(request: Request):
 def get_status(request: Request):
     ctx = _get_ctx(request)
     return {
-        "lock": ctx.lock.get_status(),
+        "lock": {
+            "connected": ctx.lock.connected,
+            "status": ctx.lock.get_status(),
+        },
         "camera": {
             "active": True,
             "streams_active": ctx.active_streams,
@@ -345,7 +348,7 @@ def recognize_stream(request: Request, timeout: int = 10):
                             name=result["name"],
                             authorized=True,
                             confidence=result["confidence"],
-                            action=lock_result.get("action", "face_open"),
+                            action="face_open",
                         )
                         logger.info(f"[RECOGNIZE] Acceso concedido: {result['name']}")
                         final_result = result

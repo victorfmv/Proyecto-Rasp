@@ -11,6 +11,7 @@ venv/
 # Scripts de prueba
 prueba_foto.py
 prueba_video.py
+test_serial.py
 
 # Datos dinámicos del proyecto (Bases de datos y Logs)
 faces/
