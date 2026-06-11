@@ -1,0 +1,115 @@
+{% extends "base.html" %}
+{% block title %}Logs{% endblock %}
+
+{% block content %}
+<h2 class="page-title">Historial de accesos</h2>
+
+<div class="stats-row">
+  <div class="stat-box">
+    <div class="stat-num stat-total" id="stat-total">—</div>
+    <div class="stat-label">Total intentos</div>
+  </div>
+  <div class="stat-box">
+    <div class="stat-num stat-ok" id="stat-auth">—</div>
+    <div class="stat-label">Autorizados</div>
+  </div>
+  <div class="stat-box">
+    <div class="stat-num stat-deny" id="stat-denied">—</div>
+    <div class="stat-label">Denegados</div>
+  </div>
+</div>
+
+<div class="section">
+  <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:16px">
+    <div class="section-title" style="margin:0">Registros recientes</div>
+    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+      <div class="form-group" style="flex-direction:row;align-items:center;gap:8px">
+        <label style="white-space:nowrap">Mostrar:</label>
+        <select id="limit-sel">
+          <option value="25" selected>25</option>
+          <option value="50">50</option>
+          <option value="100">100</option>
+        </select>
+      </div>
+      <button class="btn btn-secondary btn-sm" id="btn-refresh">Actualizar</button>
+    </div>
+  </div>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Fecha y hora</th>
+          <th>Nombre</th>
+          <th>Acción</th>
+          <th>Estado</th>
+          <th>Confianza</th>
+        </tr>
+      </thead>
+      <tbody id="logs-body">
+        <tr><td colspan="5" style="text-align:center;color:var(--muted);padding:28px">Cargando…</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function loadStats() {
+  try {
+    const r = await fetch('/logs/stats');
+    const d = await r.json();
+    document.getElementById('stat-total').textContent  = d.total_attempts ?? '—';
+    document.getElementById('stat-auth').textContent   = d.authorized     ?? '—';
+    document.getElementById('stat-denied').textContent = d.denied         ?? '—';
+  } catch (e) {}
+}
+
+async function loadLogs() {
+  const limit = document.getElementById('limit-sel').value;
+  const tbody = document.getElementById('logs-body');
+  try {
+    const r = await fetch('/logs?limit=' + limit);
+    const d = await r.json();
+
+    if (!d.logs || d.logs.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:28px">Sin registros.</td></tr>';
+      return;
+    }
+
+    tbody.innerHTML = d.logs.map(log => {
+      const isAuth  = log.authorized === 1 || log.authorized === true;
+      const isManual = log.action === 'manual_open';
+      const date    = log.timestamp ? new Date(log.timestamp).toLocaleString('es-ES') : '—';
+      const conf    = log.confidence != null ? (log.confidence * 100).toFixed(0) + '%' : '—';
+
+      let badge;
+      if (isManual) {
+        badge = '<span class="badge badge-manual">Manual</span>';
+      } else {
+        badge = isAuth
+          ? '<span class="badge badge-ok">Autorizado</span>'
+          : '<span class="badge badge-deny">Denegado</span>';
+      }
+
+      return `<tr>
+        <td style="color:var(--muted)">${date}</td>
+        <td>${log.name || '—'}</td>
+        <td style="color:var(--muted)">${log.action || '—'}</td>
+        <td>${badge}</td>
+        <td>${conf}</td>
+      </tr>`;
+    }).join('');
+  } catch (e) {
+    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--red);padding:28px">Error al cargar los registros.</td></tr>';
+  }
+}
+
+document.getElementById('btn-refresh').addEventListener('click', () => { loadStats(); loadLogs(); });
+document.getElementById('limit-sel').addEventListener('change', loadLogs);
+
+loadStats();
+loadLogs();
+</script>
+{% endblock %}

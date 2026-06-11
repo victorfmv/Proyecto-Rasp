@@ -1,0 +1,114 @@
+{% extends "base.html" %}
+{% block title %}Stream{% endblock %}
+
+{% block content %}
+<h2 class="page-title">Stream de la cámara</h2>
+
+<div class="section">
+  <div class="section-title">Modo</div>
+  <div style="display:flex;gap:20px;flex-wrap:wrap;margin-bottom:16px">
+    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;color:var(--text);font-size:0.875rem">
+      <input type="radio" name="mode" value="simple" checked>
+      Stream simple <span style="color:var(--muted)">(continuo, sin reconocimiento)</span>
+    </label>
+    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;color:var(--text);font-size:0.875rem">
+      <input type="radio" name="mode" value="preview">
+      Preview con reconocimiento <span style="color:var(--muted)">(no abre la cerradura)</span>
+    </label>
+  </div>
+
+  <div id="dur-row" style="display:none;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap">
+    <label style="font-size:0.8rem;white-space:nowrap">
+      Duración: <strong id="dur-val">10</strong>s
+    </label>
+    <input type="range" id="dur-range" min="1" max="30" value="10">
+    <span style="font-size:0.75rem;color:var(--muted)">(máx. 30 s)</span>
+  </div>
+
+  <div class="action-row">
+    <button class="btn btn-primary" id="btn-start">Iniciar stream</button>
+    <button class="btn btn-danger"  id="btn-stop" disabled>Detener stream</button>
+  </div>
+
+  <div class="stream-box" id="stream-box">
+    <span class="stream-placeholder">Pulsa "Iniciar stream" para ver la cámara en vivo.</span>
+  </div>
+
+  <div id="msg-stream" class="msg hidden"></div>
+
+  <p style="font-size:0.78rem;color:var(--muted);margin-top:10px">
+    El stream simple permanece activo hasta que pulses "Detener stream" o cierres la pestaña.<br>
+    El preview con reconocimiento se detiene automáticamente al acabar el tiempo.
+  </p>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const msgEl = document.getElementById('msg-stream');
+let activeImg = null;
+
+function getMode()     { return document.querySelector('input[name="mode"]:checked').value; }
+function getDuration() { return document.getElementById('dur-range').value; }
+
+document.querySelectorAll('input[name="mode"]').forEach(r => {
+  r.addEventListener('change', () => {
+    document.getElementById('dur-row').style.display = getMode() === 'preview' ? 'flex' : 'none';
+  });
+});
+
+document.getElementById('dur-range').addEventListener('input', e => {
+  document.getElementById('dur-val').textContent = e.target.value;
+});
+
+document.getElementById('btn-start').addEventListener('click', () => {
+  const mode = getMode();
+  const url  = mode === 'simple'
+    ? '/stream'
+    : `/stream/preview?duration=${getDuration()}`;
+
+  const box = document.getElementById('stream-box');
+  box.innerHTML = '';
+
+  activeImg = document.createElement('img');
+  activeImg.src = url;
+  activeImg.alt = 'Stream en vivo';
+  box.appendChild(activeImg);
+
+  // For preview mode, auto-reset controls when the stream ends
+  if (mode === 'preview') {
+    const dur = parseInt(getDuration(), 10);
+    setTimeout(resetControls, (dur + 1) * 1000);
+  }
+
+  document.getElementById('btn-start').disabled = true;
+  document.getElementById('btn-stop').disabled  = false;
+  showMsg(msgEl,
+    mode === 'preview'
+      ? `Preview iniciado (${getDuration()}s). Los resultados aparecen sobre el video.`
+      : 'Stream iniciado. Pulsa "Detener stream" para pararlo.',
+    'ok'
+  );
+});
+
+document.getElementById('btn-stop').addEventListener('click', async () => {
+  if (getMode() === 'simple') {
+    try { await fetch('/stream/stop', { method: 'POST' }); } catch (e) {}
+  }
+  clearStream();
+  showMsg(msgEl, 'Stream detenido.', 'ok');
+});
+
+function clearStream() {
+  if (activeImg) { activeImg.src = ''; activeImg = null; }
+  document.getElementById('stream-box').innerHTML =
+    '<span class="stream-placeholder">Stream detenido.</span>';
+  resetControls();
+}
+
+function resetControls() {
+  document.getElementById('btn-start').disabled = false;
+  document.getElementById('btn-stop').disabled  = true;
+}
+</script>
+{% endblock %}

@@ -28,6 +28,8 @@ from dataclasses import dataclass, field
 import cv2
 from fastapi import FastAPI, Request, UploadFile, File, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
 
 from app.face_engine import FaceEngine
 from app.camera import Camera
@@ -192,6 +194,9 @@ app = FastAPI(
     version="2.5.0",
     lifespan=lifespan,
 )
+
+app.mount("/static", StaticFiles(directory="static"), name="static")
+templates = Jinja2Templates(directory="templates")
 
 
 # ---------------------------------------------------------------------------
@@ -604,6 +609,31 @@ def preview_stream(request: Request, duration: int = 10):
         logger.info("[PREVIEW] Stream finalizado.")
 
     return StreamingResponse(generate(), media_type="multipart/x-mixed-replace; boundary=frame")
+
+
+# ---------------------------------------------------------------------------
+# Rutas — Interfaz gráfica web (UI)
+# ---------------------------------------------------------------------------
+
+@app.get("/ui", response_class=HTMLResponse, include_in_schema=False)
+@app.get("/ui/", response_class=HTMLResponse, include_in_schema=False)
+def ui_dashboard(request: Request):
+    return templates.TemplateResponse(request, "dashboard.html")
+
+
+@app.get("/ui/stream", response_class=HTMLResponse, include_in_schema=False)
+def ui_stream(request: Request):
+    return templates.TemplateResponse(request, "stream.html")
+
+
+@app.get("/ui/faces", response_class=HTMLResponse, include_in_schema=False)
+def ui_faces(request: Request):
+    return templates.TemplateResponse(request, "faces.html")
+
+
+@app.get("/ui/logs", response_class=HTMLResponse, include_in_schema=False)
+def ui_logs(request: Request):
+    return templates.TemplateResponse(request, "logs.html")
 
 
 # ---------------------------------------------------------------------------

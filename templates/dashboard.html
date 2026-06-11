@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+{% block title %}Dashboard{% endblock %}
+
+{% block content %}
+<h2 class="page-title">Dashboard</h2>
+
+<div class="card-grid">
+  <div class="card" id="card-lock">
+    <div class="card-label">Cerradura</div>
+    <div class="card-value" id="val-lock">—</div>
+  </div>
+  <div class="card card-ok">
+    <div class="card-label">Cámara</div>
+    <div class="card-value" style="color:var(--green)">Activa</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Streams activos</div>
+    <div class="card-value" id="val-streams">—</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Caras registradas</div>
+    <div class="card-value" id="val-faces">—</div>
+  </div>
+</div>
+
+<div class="action-row">
+  <button class="btn btn-primary btn-lg" id="btn-unlock">Abrir cerradura</button>
+  <a class="btn btn-secondary btn-lg" href="/recognize" target="_blank">Iniciar reconocimiento ↗</a>
+  <a class="btn btn-secondary btn-lg" href="/ui/stream">Ver stream</a>
+</div>
+
+<div id="msg" class="msg hidden"></div>
+
+<div class="section" style="margin-top: 8px;">
+  <div class="section-title">Último acceso</div>
+  <p id="last-access" style="font-size:0.875rem; color:var(--muted)">Cargando…</p>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const msgEl = document.getElementById('msg');
+
+async function loadStatus() {
+  try {
+    const [statusRes, statsRes] = await Promise.all([
+      fetch('/status'),
+      fetch('/logs/stats'),
+    ]);
+    const s = await statusRes.json();
+    const stats = await statsRes.json();
+
+    const connected = s.lock && s.lock.connected;
+    document.getElementById('val-lock').textContent = connected ? 'Conectada' : 'Sin serial';
+    document.getElementById('val-lock').style.color = connected ? 'var(--green)' : 'var(--yellow)';
+    document.getElementById('card-lock').className = 'card ' + (connected ? 'card-ok' : 'card-warn');
+    document.getElementById('val-streams').textContent = s.camera.streams_active;
+    document.getElementById('val-faces').textContent = s.registered_faces.length;
+
+    if (stats.last_access) {
+      const d = new Date(stats.last_access.timestamp);
+      document.getElementById('last-access').textContent =
+        `${stats.last_access.name} — ${d.toLocaleString('es-ES')}`;
+    } else {
+      document.getElementById('last-access').textContent = 'Sin registros aún.';
+    }
+  } catch (e) {}
+}
+
+document.getElementById('btn-unlock').addEventListener('click', async () => {
+  const btn = document.getElementById('btn-unlock');
+  btn.disabled = true;
+  btn.textContent = 'Abriendo…';
+  try {
+    const r = await fetch('/unlock/manual', { method: 'POST' });
+    const d = await r.json();
+    showMsg(msgEl,
+      d.success
+        ? 'Cerradura abierta correctamente.'
+        : 'Error: ' + (d.message || 'Sin respuesta del hardware.'),
+      d.success ? 'ok' : 'error'
+    );
+  } catch (e) {
+    showMsg(msgEl, 'Error de conexión con el servidor.', 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Abrir cerradura';
+    loadStatus();
+  }
+});
+
+loadStatus();
+setInterval(loadStatus, 6000);
+</script>
+{% endblock %}

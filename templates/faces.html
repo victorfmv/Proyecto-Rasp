@@ -1,0 +1,154 @@
+{% extends "base.html" %}
+{% block title %}Caras{% endblock %}
+
+{% block content %}
+<h2 class="page-title">Gestión de caras</h2>
+
+<div class="section">
+  <div class="section-title">Caras registradas</div>
+  <div id="face-list" class="face-list">
+    <span style="color:var(--muted);font-size:0.875rem">Cargando…</span>
+  </div>
+  <div id="msg-delete" class="msg hidden"></div>
+</div>
+
+<div class="section">
+  <div class="section-title">Registrar desde archivo</div>
+  <p style="font-size:0.8rem;color:var(--muted);margin-bottom:14px">
+    Sube una foto en JPG o PNG donde el rostro sea claramente visible y no esté tapado.
+  </p>
+  <div class="form-row">
+    <div class="form-group">
+      <label>Nombre</label>
+      <input type="text" id="up-name" placeholder="Nombre completo" style="width:210px">
+    </div>
+    <div class="form-group">
+      <label>Foto</label>
+      <input type="file" id="up-file" accept="image/*">
+    </div>
+    <button class="btn btn-primary" id="btn-upload" style="align-self:flex-end">Registrar</button>
+  </div>
+  <div id="msg-upload" class="msg hidden"></div>
+</div>
+
+<div class="section">
+  <div class="section-title">Registrar con la cámara</div>
+  <p style="font-size:0.8rem;color:var(--muted);margin-bottom:14px">
+    Captura directamente desde la Pi Camera. Colócate frente a la cámara antes de pulsar el botón.
+    La cámara hará un calentamiento de varios frames para estabilizar la exposición.
+  </p>
+  <div class="form-row">
+    <div class="form-group">
+      <label>Nombre</label>
+      <input type="text" id="cam-name" placeholder="Nombre completo" style="width:210px">
+    </div>
+    <button class="btn btn-success" id="btn-cam" style="align-self:flex-end">Capturar y registrar</button>
+  </div>
+  <div id="msg-cam" class="msg hidden"></div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const msgDelete = document.getElementById('msg-delete');
+const msgUpload = document.getElementById('msg-upload');
+const msgCam    = document.getElementById('msg-cam');
+
+async function loadFaces() {
+  try {
+    const r = await fetch('/faces');
+    const d = await r.json();
+    const container = document.getElementById('face-list');
+    if (!d.faces || d.faces.length === 0) {
+      container.innerHTML = '<span style="color:var(--muted);font-size:0.875rem">No hay caras registradas.</span>';
+      return;
+    }
+    container.innerHTML = d.faces.map(name => {
+      const initial = name.trim()[0].toUpperCase();
+      const safe = name.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+      return `
+        <div class="face-chip">
+          <div class="avatar">${initial}</div>
+          <span>${name}</span>
+          <button class="btn btn-danger btn-sm" onclick="deleteFace(this,'${safe}')">Eliminar</button>
+        </div>`;
+    }).join('');
+  } catch (e) {}
+}
+
+async function deleteFace(btn, name) {
+  if (!confirm(`¿Eliminar la cara de "${name}"?`)) return;
+  btn.disabled = true;
+  try {
+    const r = await fetch('/faces/' + encodeURIComponent(name), { method: 'DELETE' });
+    const d = await r.json();
+    if (r.ok && d.success) {
+      showMsg(msgDelete, `Cara de "${name}" eliminada.`, 'ok');
+      loadFaces();
+    } else {
+      showMsg(msgDelete, d.detail || d.reason || 'No se pudo eliminar.', 'error');
+      btn.disabled = false;
+    }
+  } catch (e) {
+    showMsg(msgDelete, 'Error de conexión.', 'error');
+    btn.disabled = false;
+  }
+}
+
+document.getElementById('btn-upload').addEventListener('click', async () => {
+  const name = document.getElementById('up-name').value.trim();
+  const file = document.getElementById('up-file').files[0];
+  if (name.length < 2) { showMsg(msgUpload, 'El nombre debe tener al menos 2 caracteres.', 'error'); return; }
+  if (!file)           { showMsg(msgUpload, 'Selecciona una imagen.', 'error'); return; }
+
+  const btn = document.getElementById('btn-upload');
+  btn.disabled = true; btn.textContent = 'Registrando…';
+
+  const form = new FormData();
+  form.append('file', file);
+
+  try {
+    const r = await fetch('/faces/register?name=' + encodeURIComponent(name), { method: 'POST', body: form });
+    const d = await r.json();
+    if (r.ok) {
+      showMsg(msgUpload, `"${name}" registrado correctamente.`, 'ok');
+      document.getElementById('up-name').value = '';
+      document.getElementById('up-file').value = '';
+      loadFaces();
+    } else {
+      showMsg(msgUpload, d.detail || 'No se pudo registrar.', 'error');
+    }
+  } catch (e) {
+    showMsg(msgUpload, 'Error de conexión.', 'error');
+  } finally {
+    btn.disabled = false; btn.textContent = 'Registrar';
+  }
+});
+
+document.getElementById('btn-cam').addEventListener('click', async () => {
+  const name = document.getElementById('cam-name').value.trim();
+  if (name.length < 2) { showMsg(msgCam, 'El nombre debe tener al menos 2 caracteres.', 'error'); return; }
+
+  const btn = document.getElementById('btn-cam');
+  btn.disabled = true; btn.textContent = 'Capturando… (puede tardar unos segundos)';
+
+  try {
+    const r = await fetch('/faces/register/camera?name=' + encodeURIComponent(name), { method: 'POST' });
+    const d = await r.json();
+    if (r.ok) {
+      showMsg(msgCam, `"${name}" registrado desde la cámara.`, 'ok');
+      document.getElementById('cam-name').value = '';
+      loadFaces();
+    } else {
+      showMsg(msgCam, d.detail || 'No se pudo capturar.', 'error');
+    }
+  } catch (e) {
+    showMsg(msgCam, 'Error de conexión.', 'error');
+  } finally {
+    btn.disabled = false; btn.textContent = 'Capturar y registrar';
+  }
+});
+
+loadFaces();
+</script>
+{% endblock %}
