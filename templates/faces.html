@@ -33,17 +33,35 @@
 
 <div class="section">
   <div class="section-title">Registrar con la cámara</div>
-  <p style="font-size:0.8rem;color:var(--muted);margin-bottom:14px">
-    Captura directamente desde la Pi Camera. Colócate frente a la cámara antes de pulsar el botón.
-    La cámara hará un calentamiento de varios frames para estabilizar la exposición.
-  </p>
-  <div class="form-row">
-    <div class="form-group">
-      <label>Nombre</label>
-      <input type="text" id="cam-name" placeholder="Nombre completo" style="width:210px">
+
+  <!-- Paso 1: nombre + capturar -->
+  <div id="cam-step1">
+    <p style="font-size:0.8rem;color:var(--muted);margin-bottom:14px">
+      Colócate frente a la cámara antes de pulsar el botón. Se tomará una foto para previsualizar antes de registrar.
+    </p>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Nombre</label>
+        <input type="text" id="cam-name" placeholder="Nombre completo" style="width:210px">
+      </div>
+      <button class="btn btn-success" id="btn-cam-capture" style="align-self:flex-end">Capturar foto</button>
     </div>
-    <button class="btn btn-success" id="btn-cam" style="align-self:flex-end">Capturar y registrar</button>
   </div>
+
+  <!-- Paso 2: preview + confirmar o repetir -->
+  <div id="cam-step2" style="display:none">
+    <p style="font-size:0.8rem;color:var(--muted);margin-bottom:12px">
+      Revisa la foto. Si no es correcta, pulsa <strong>Repetir</strong> para tomar otra.
+    </p>
+    <img id="cam-preview"
+         src="" alt="Foto capturada"
+         style="max-width:320px;width:100%;border:2px solid var(--border);border-radius:6px;display:block;margin-bottom:14px">
+    <div class="action-row">
+      <button class="btn btn-secondary" id="btn-cam-retake">Repetir captura</button>
+      <button class="btn btn-primary"   id="btn-cam-confirm">Confirmar y registrar</button>
+    </div>
+  </div>
+
   <div id="msg-cam" class="msg hidden"></div>
 </div>
 {% endblock %}
@@ -125,27 +143,67 @@ document.getElementById('btn-upload').addEventListener('click', async () => {
   }
 });
 
-document.getElementById('btn-cam').addEventListener('click', async () => {
+let capturedBlob = null;
+
+async function doCapture() {
   const name = document.getElementById('cam-name').value.trim();
   if (name.length < 2) { showMsg(msgCam, 'El nombre debe tener al menos 2 caracteres.', 'error'); return; }
 
-  const btn = document.getElementById('btn-cam');
-  btn.disabled = true; btn.textContent = 'Capturando… (puede tardar unos segundos)';
+  const btn = document.getElementById('btn-cam-capture');
+  btn.disabled = true; btn.textContent = 'Capturando…';
 
   try {
-    const r = await fetch('/faces/register/camera?name=' + encodeURIComponent(name), { method: 'POST' });
+    const r = await fetch('/ui/faces/capture');
+    if (!r.ok) throw new Error();
+    capturedBlob = await r.blob();
+    const url = URL.createObjectURL(capturedBlob);
+    document.getElementById('cam-preview').src = url;
+    document.getElementById('cam-step1').style.display = 'none';
+    document.getElementById('cam-step2').style.display = 'block';
+  } catch (e) {
+    showMsg(msgCam, 'No se pudo capturar. Inténtalo de nuevo.', 'error');
+  } finally {
+    btn.disabled = false; btn.textContent = 'Capturar foto';
+  }
+}
+
+document.getElementById('btn-cam-capture').addEventListener('click', doCapture);
+
+document.getElementById('btn-cam-retake').addEventListener('click', () => {
+  capturedBlob = null;
+  document.getElementById('cam-preview').src = '';
+  document.getElementById('cam-step2').style.display = 'none';
+  document.getElementById('cam-step1').style.display = 'block';
+  document.getElementById('msg-cam').className = 'msg hidden';
+});
+
+document.getElementById('btn-cam-confirm').addEventListener('click', async () => {
+  const name = document.getElementById('cam-name').value.trim();
+  if (!capturedBlob) { showMsg(msgCam, 'Primero captura una foto.', 'error'); return; }
+
+  const btn = document.getElementById('btn-cam-confirm');
+  btn.disabled = true; btn.textContent = 'Registrando…';
+
+  const form = new FormData();
+  form.append('file', capturedBlob, 'capture.jpg');
+
+  try {
+    const r = await fetch('/faces/register?name=' + encodeURIComponent(name), { method: 'POST', body: form });
     const d = await r.json();
     if (r.ok) {
-      showMsg(msgCam, `"${name}" registrado desde la cámara.`, 'ok');
+      showMsg(msgCam, `"${name}" registrado correctamente.`, 'ok');
+      capturedBlob = null;
       document.getElementById('cam-name').value = '';
+      document.getElementById('cam-step2').style.display = 'none';
+      document.getElementById('cam-step1').style.display = 'block';
       loadFaces();
     } else {
-      showMsg(msgCam, d.detail || 'No se pudo capturar.', 'error');
+      showMsg(msgCam, d.detail || 'No se pudo registrar. Intenta capturar de nuevo.', 'error');
     }
   } catch (e) {
     showMsg(msgCam, 'Error de conexión.', 'error');
   } finally {
-    btn.disabled = false; btn.textContent = 'Capturar y registrar';
+    btn.disabled = false; btn.textContent = 'Confirmar y registrar';
   }
 });
 

@@ -110,5 +110,21 @@ function resetControls() {
   document.getElementById('btn-start').disabled = false;
   document.getElementById('btn-stop').disabled  = true;
 }
+
+// Detener stream simple al cambiar de pestaña del navegador
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden && activeImg && getMode() === 'simple') {
+    navigator.sendBeacon('/stream/stop');
+    clearStream();
+    showMsg(msgEl, 'Stream detenido al cambiar de pestaña.', 'ok');
+  }
+});
+
+// Detener stream simple al navegar fuera de la página
+window.addEventListener('pagehide', () => {
+  if (activeImg && getMode() === 'simple') {
+    navigator.sendBeacon('/stream/stop');
+  }
+});
 </script>
 {% endblock %}

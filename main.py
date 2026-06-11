@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 
 import cv2
 from fastapi import FastAPI, Request, UploadFile, File, HTTPException
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -634,6 +634,21 @@ def ui_faces(request: Request):
 @app.get("/ui/logs", response_class=HTMLResponse, include_in_schema=False)
 def ui_logs(request: Request):
     return templates.TemplateResponse(request, "logs.html")
+
+
+@app.get("/ui/faces/capture", include_in_schema=False)
+def ui_capture_preview(request: Request):
+    """Captura un único frame de la Pi Camera y lo devuelve como JPEG. Solo para previsualización UI."""
+    ctx = _get_ctx(request)
+    try:
+        ctx.warmup_camera(frames=5)
+        frame_rgb = ctx.camera.capture_rgb()
+    except Exception as exc:
+        logger.error(f"[UI CAPTURE] {exc}")
+        raise HTTPException(500, "No se pudo capturar imagen de la cámara.")
+    frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+    _, buf = cv2.imencode(".jpg", frame_bgr, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    return Response(content=buf.tobytes(), media_type="image/jpeg")
 
 
 # ---------------------------------------------------------------------------
