@@ -37,10 +37,10 @@ class Camera:
             logger.info(f"✓ Cámara Pi iniciada con libcamera ({self.width}x{self.height})")
             
         except ImportError:
-            logger.error("❌ ERROR: picamera2 no está instalado. Instala con: pip install picamera2")
+            logger.error("ERROR: picamera2 no está instalado. Instala con: pip install picamera2")
             raise RuntimeError("picamera2 requerido pero no disponible")
         except Exception as e:
-            logger.error(f"❌ ERROR inicializando cámara Pi: {e}")
+            logger.error(f"ERROR inicializando cámara Pi: {e}")
             logger.error("Verifica que la cámara está conectada al puerto CSI y habilitada en raspi-config")
             raise RuntimeError(f"Error al inicializar cámara: {e}")
 

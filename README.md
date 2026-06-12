@@ -4,16 +4,15 @@ Integración de una cerradura magnética controlada por el arduino y una cámara
 
 ## Código del arduino
 ```cpp
-// ------------------------------------------------------------------
-// Smart Lock - Controlador de Hardware por Eventos (Sin Bloqueo)
-// ------------------------------------------------------------------
+// -------------------------------------------------
+// Smart Lock - Controlador de Hardware por Eventos 
+// -------------------------------------------------
 
 // Definición de Pines
 const uint8_t PIN_RELE = 7; 
 const uint8_t LED_RED = 8;
 const uint8_t LED_GREEN = 9;
 const uint8_t BUTTON_INSIDE = 10;  // Botón para salir (abre directo)
-const uint8_t BUTTON_OUTSIDE = 11; // NUEVO: Botón para pedir reconocimiento (activa cámara)
 
 // Variables de Control de Tiempo
 unsigned long tiempoApertura = 0;
@@ -22,18 +21,18 @@ bool lockAbierto = false;
 
 // Banderas para control de pulsaciones únicas (Debounce)
 bool insidePresionadoAntes = false;
-bool outsidePresionadoAntes = false;
 
 void setup() {
-  Serial.begin(9600);
+
+  Serial.begin(9600); 
   
+  // Pines del relevador y leds
   pinMode(PIN_RELE, OUTPUT);
   pinMode(LED_RED, OUTPUT);
   pinMode(LED_GREEN, OUTPUT);
   
-  // Ambos botones usan la resistencia pull-up interna del Arduino
+  // Botón interno con pull-up interno
   pinMode(BUTTON_INSIDE, INPUT_PULLUP);
-  pinMode(BUTTON_OUTSIDE, INPUT_PULLUP);
   
   // Estado inicial: Seguro puesto
   digitalWrite(PIN_RELE, HIGH);
@@ -58,8 +57,9 @@ inline void close_lock() {
   lockAbierto = false;
 }
 
-// NUEVO: Función no bloqueante para parpadear el LED rojo 2 veces
+// Función para parpadear el LED rojo indicando escaneo activo de la Pi
 void blink_red_indicator() {
+  // Parpadea un par de veces para avisar al usuario que mire a la cámara
   for(int i = 0; i < 2; i++) {
     digitalWrite(LED_RED, LOW);
     delay(150);
@@ -83,9 +83,12 @@ void loop() {
     if (comando == "OPEN") {
       open_lock();
       Serial.println("OK_ABIERTO");   
-    } else if (comando == "BLINK_RED") {
-      blink_red_indicator(); // La Pi nos pide avisar que la cámara está encendida
-    } else if (comando.length() > 0) {
+    } 
+    // Sincronizado: La Rasp envía REQ_RECOGNITION al iniciar execute_recognition_flow()
+    else if (comando == "REQ_RECOGNITION") {
+      blink_red_indicator(); 
+    } 
+    else if (comando.length() > 0) {
       Serial.print("ERROR_COMANDO_DESCONOCIDO:");
       Serial.println(comando);
     }
@@ -97,20 +100,9 @@ void loop() {
     open_lock();
     Serial.println("OK_BOTON_INTERNO");
     insidePresionadoAntes = true;
-    delay(5);
+    delay(5); // Pequeño debounce físico
   } else if (!botonInsideActual) {
     insidePresionadoAntes = false;
-  }
-
-  // 4. NUEVO: Botón Externo (Solicitud de Reconocimiento Facial)
-  bool botonOutsideActual = !digitalRead(BUTTON_OUTSIDE);
-  if (botonOutsideActual && !outsidePresionadoAntes) {
-    // Le avisamos a la Raspberry Pi que alguien quiere entrar
-    Serial.println("REQ_RECOGNITION"); 
-    outsidePresionadoAntes = true;
-    delay(5);
-  } else if (!botonOutsideActual) {
-    outsidePresionadoAntes = false;
   }
 }
 ```
